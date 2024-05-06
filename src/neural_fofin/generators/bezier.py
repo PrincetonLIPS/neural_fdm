@@ -5,9 +5,9 @@ import jax.numpy as jnp
 
 import matplotlib.pyplot as plt
 
-from neural_fofin.grids import PointGridAsymmetric
-from neural_fofin.grids import PointGridSymmetric
-from neural_fofin.grids import PointGridSymmetricDouble
+from neural_fofin.generators.grids import PointGridAsymmetric
+from neural_fofin.generators.grids import PointGridSymmetric
+from neural_fofin.generators.grids import PointGridSymmetricDouble
 
 
 # ===============================================================================

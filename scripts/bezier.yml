@@ -2,16 +2,16 @@
 seed: 91
 # data generator
 generator:
+  # bezier
   # options: "bezier_symmetric_double", "bezier_symmetric", "bezier_asymmetric"
   name: "bezier_symmetric_double"
   bounds: "saddle"  # options: pillow, dome, saddle
   num_uv: 10
   size: 10.0
-  num_points: 4
+  num_points: 4  # grid points
 # fd simulation
 fdm:
   load: -0.5  # -0.5, scale of vertical area load
-  # add support type? options: boundary, corners, etc
 # encoder
 encoder: 
   hidden_layer_size: 256
@@ -20,11 +20,12 @@ encoder:
   final_activation_fn_name: "softplus"  # needs softplus to ensure positive output
 # decoder
 decoder:
-  # If true, the decoder maps (q, boundary conditions) -> x. Otherwise, q -> x.
+  # If true, the decoder maps (z, boundary conditions) -> x. Otherwise, z -> x.
   include_params_xl: True
   hidden_layer_size: 256
   hidden_layer_num: 3
   activation_fn_name: "elu"
+# loss function
 loss:
   shape:
     include: True

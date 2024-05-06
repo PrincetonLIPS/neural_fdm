@@ -4,14 +4,26 @@ import optax
 
 import jax.numpy as jnp
 
+from functools import partial
+
 from jax_fdm.equilibrium import EquilibriumModel
 from jax_fdm.equilibrium import EquilibriumMeshStructure
 
+from neural_fofin.generators import BezierSurfacePointGenerator
 from neural_fofin.generators import BezierSurfaceAsymmetricPointGenerator
 from neural_fofin.generators import BezierSurfaceSymmetricPointGenerator
 from neural_fofin.generators import BezierSurfaceSymmetricDoublePointGenerator
 
-from neural_fofin.mesh import create_mesh_from_bezier
+from neural_fofin.generators import CircularTubePointGenerator
+from neural_fofin.generators import EllipticalTubePointGenerator
+from neural_fofin.generators import TubePointGenerator
+
+from neural_fofin.mesh import create_mesh_from_bezier_generator
+from neural_fofin.mesh import create_mesh_from_tube_generator
+
+from neural_fofin.losses import compute_loss
+from neural_fofin.losses import compute_loss_shape_residual
+from neural_fofin.losses import compute_loss_residual_smoothness
 
 from neural_fofin.models import AutoEncoder
 from neural_fofin.models import AutoEncoderPiggy
@@ -23,7 +35,57 @@ from neural_fofin.models import MLPDecoderXL
 
 
 # ===============================================================================
-# Shape generator bounds
+# Tower shape generator bounds
+# ===============================================================================
+
+def ellipse_minmax_values():
+    """
+    The boundary values for an ellipse.
+    """
+    # radius 1, radius 2, rotation
+    # radii are scale factors relative to the base radius of a tower
+    minval = [0.5, 0.5, 0.0]
+    maxval = [2.0, 2.0, 0.0]
+
+    return minval, maxval
+
+
+def ellipse_rotated_minmax_values():
+    """
+    The boundary values for rotated ellipse.
+    """
+    # radius 1, radius 2, rotation
+    # radii are scale factors relative to the base radius of a tower
+    minval = [0.5, 0.5, -45.0]
+    maxval = [2.0, 2.0, 45.0]
+
+    return minval, maxval
+
+
+def get_tower_generator_minmax_values(name, bounds):
+    """
+    """
+    experiments = {
+        "straight": ellipse_minmax_values,
+        "twisted": ellipse_rotated_minmax_values,
+    }
+
+    values_fn = experiments.get(bounds)
+    if not values_fn:
+        raise KeyError(f"Experiment bounds: {bounds} is currently unsupported!")
+
+    # generate values on a quarter tile
+    minval, maxval = values_fn()
+
+    # array-ify
+    minval = jnp.array(minval)
+    maxval = jnp.array(maxval)
+
+    return minval, maxval
+
+
+# ===============================================================================
+# Bezier shape generator bounds
 # ===============================================================================
 
 def pillow_minmax_values():
@@ -89,7 +151,7 @@ def saddle_minmax_values():
     return minval, maxval
 
 
-def get_generator_minmax_values(name, bounds):
+def get_bezier_generator_minmax_values(name, bounds):
     experiments = {
         "pillow": pillow_minmax_values,
         "dome": dome_minmax_values,
@@ -124,6 +186,35 @@ def get_generator_minmax_values(name, bounds):
 # Data generators
 # ===============================================================================
 
+def build_tube_point_generator(generator_params):
+    """
+    """
+    # unpack parameters
+    name = generator_params["name"]
+    bounds = generator_params["bounds"]
+
+    height = generator_params["height"]
+    radius = generator_params["radius"]
+    num_sides = generator_params["num_sides"]
+    num_levels = generator_params["num_levels"]
+    num_rings = generator_params["num_rings"]
+
+    # wiggle bounds for task
+    minval, maxval = get_tower_generator_minmax_values(name, bounds)
+
+    # Create data generator
+    generators = {
+        "ellipse": EllipticalTubePointGenerator,
+        "circle": CircularTubePointGenerator,
+    }
+
+    name = generator_params["name"].split("_")[-1]
+    generator = generators.get(name)
+    if not generator:
+        raise ValueError(f"Generator {name} is not supported yet!")
+
+    return generator(height, radius, num_sides, num_levels, num_rings, minval, maxval)
+
 
 def build_bezier_point_generator(generator_params):
     """
@@ -137,7 +228,7 @@ def build_bezier_point_generator(generator_params):
     bounds = generator_params["bounds"]
 
     # wiggle bounds for task
-    minval, maxval = get_generator_minmax_values(name, bounds)
+    minval, maxval = get_bezier_generator_minmax_values(name, bounds)
 
     # Create data generator
     u = jnp.linspace(0.0, 1.0, num_u)
@@ -159,35 +250,48 @@ def build_bezier_point_generator(generator_params):
 
 def build_data_generator(config):
     """
+    TODO: Pick generator based on task name
     """
     # unpack parameters
     generator_params = config["generator"]
 
+    # pick generator function
+    generator_builders = {
+        "bezier": build_bezier_point_generator,
+        "tower": build_tube_point_generator
+    }
+
+    name = generator_params["name"].split("_")[0]
+
+    generator_builder = generator_builders.get(name)
+    if not generator_builder:
+        raise ValueError(f"Generator {name} is not supported yet!")
+
     # build bezier generator
-    return build_bezier_point_generator(generator_params)
+    return generator_builder(generator_params)
 
 
 # ===============================================================================
 # Mesh
 # ===============================================================================
 
-
 def build_mesh_from_generator(generator):
     """
+    Generate a JAX FDM mesh according to the generator type.
     """
-    # unpack parameters
-    surface = generator.surface
-    u = generator.u
-    v = generator.v
+    if isinstance(generator, BezierSurfacePointGenerator):
+        mesh_builder = create_mesh_from_bezier_generator
+    elif isinstance(generator, TubePointGenerator):
+        mesh_builder = create_mesh_from_tube_generator
+    else:
+        raise ValueError(f"Cannot make meshes with generator {generator}!")
 
-    # generate base FD Mesh
-    return create_mesh_from_bezier(surface, u, v)
+    return mesh_builder(generator)
 
 
 # ===============================================================================
 # Structure (Graph)
 # ===============================================================================
-
 
 def build_connectivity_structure_from_generator(generator):
     """
@@ -223,6 +327,9 @@ def get_activation_fn(name):
 # ===============================================================================
 
 def get_optimizer_fn(name):
+    """
+    Fetch the optimizer function.
+    """
     optimizers = {
         "adam": optax.adam,
         "sgd": optax.sgd,
@@ -237,6 +344,7 @@ def get_optimizer_fn(name):
 
 def build_optimizer(config):
     """
+    Construct an optimizer.
     """
     hyperparams = config["optimizer"]
 
@@ -248,6 +356,33 @@ def build_optimizer(config):
     optimizer = optimizer_fn(learning_rate=learning_rate)
 
     return optimizer
+
+
+# ===============================================================================
+# Loss functions
+# ===============================================================================
+
+def build_loss_function(config, generator):
+    """
+    Build a loss function.
+    """
+    task_name = config["generator"]["name"]
+    loss_params = config["loss"]
+
+    if "bezier" in task_name:
+        _loss_fn = compute_loss_shape_residual
+
+    elif "tower" in task_name:
+        loss_params["residual"]["indices"] = generator.indices_rings_free_ravel
+        _loss_fn = compute_loss_residual_smoothness
+
+    loss_fn = partial(
+        compute_loss,
+        loss_fn=_loss_fn,
+        loss_params=loss_params
+    )
+
+    return loss_fn
 
 
 # ===============================================================================
@@ -279,9 +414,28 @@ def calculate_edges_mask(mesh):
         mask_val = 1.0
         if mesh.is_edge_fully_supported(edge):
             mask_val = 0.0
+            # NOTE: for tower task
+            if mesh.edge_attribute(edge, "tag") == "ring":
+                if not mesh.is_edge_on_boundary(*edge):
+                    mask_val = 1.0
         mask_edges.append(mask_val)
 
     return jnp.array(mask_edges, dtype=jnp.int64)
+
+
+def calculate_edges_stress_signs(mesh):
+    """
+    Integer array to indicate what mesh edges are in compression and in tension
+    """
+    signs = []
+    for edge in mesh.edges():
+        sign = -1  # compression by default
+        # for tower task
+        if mesh.edge_attribute(edge, "tag") == "cable":
+            sign = 1
+        signs.append(sign)
+
+    return jnp.array(signs, dtype=jnp.int64)
 
 
 # ===============================================================================
@@ -385,22 +539,44 @@ def build_neural_decoder(mesh, key, params):
 # Encoders
 # ===============================================================================
 
-def build_neural_encoder(mesh, key, params):
+def build_neural_encoder(mesh, key, params, generator):
     """
     """
     # unpack hyperparameters
-    hidden_layer_size = params["hidden_layer_size"]
-    hidden_layer_num = params["hidden_layer_num"]
-    activation_name = params["activation_fn_name"]
-    final_activation_name = params["final_activation_fn_name"]
+    nn_params, generator_params = params
+
+    hidden_layer_size = nn_params["hidden_layer_size"]
+    hidden_layer_num = nn_params["hidden_layer_num"]
+    activation_name = nn_params["activation_fn_name"]
+    final_activation_name = nn_params["final_activation_fn_name"]
 
     # mesh quantities
     num_vertices = mesh.number_of_vertices()
     num_edges = mesh.number_of_edges()
 
+    # get edges stress signs
+    edges_signs = calculate_edges_stress_signs(mesh)
+
+    # define input size
+    in_size = num_vertices
+    is_tower_task = "tower" in generator_params["name"]
+    if is_tower_task:
+        in_size = generator_params["num_rings"] * generator_params["num_sides"]
+    in_size *= 3
+
+    # define slices
+    slice_out = False
+    slice_indices = None
+    if is_tower_task:
+        slice_out = True
+        slice_indices = generator.indices_rings_ravel
+
     # instantiate MLP
     encoder = MLPEncoder(
-        in_size=num_vertices * 3,
+        edges_signs=edges_signs,
+        slice_out=slice_out,
+        slice_indices=slice_indices,
+        in_size=in_size,
         out_size=num_edges,
         width_size=hidden_layer_size,
         depth=hidden_layer_num,
@@ -416,14 +592,14 @@ def build_neural_encoder(mesh, key, params):
 # Autoencoder models
 # ===============================================================================
 
-def build_neural_formfinder(mesh, key, params):
+def build_neural_formfinder(mesh, key, params, generator):
     """
     """
     # Unpack hyperparams
     nn_params, fd_params = params
 
     # Create MLP encoder
-    encoder = build_neural_encoder(mesh, key, nn_params)
+    encoder = build_neural_encoder(mesh, key, nn_params, generator)
 
     # Build FD decoder
     decoder = build_fd_decoder(mesh, fd_params)
@@ -434,14 +610,14 @@ def build_neural_formfinder(mesh, key, params):
     return model
 
 
-def build_neural_autoencoder(mesh, key, params):
+def build_neural_autoencoder(mesh, key, params, generator):
     """
     """
     # Unpack hyperparams
     enc_params, dec_params = params
 
     # Create MLP encoder
-    encoder = build_neural_encoder(mesh, key, enc_params)
+    encoder = build_neural_encoder(mesh, key, enc_params, generator)
 
     # Build MLP decoder
     decoder = build_neural_decoder(mesh, key, dec_params)
@@ -452,7 +628,7 @@ def build_neural_autoencoder(mesh, key, params):
     return model
 
 
-def build_neural_autoencoder_piggy(mesh, key, params):
+def build_neural_autoencoder_piggy(mesh, key, params, generator):
     """
     """
     # Unpack hyperparams
@@ -460,7 +636,7 @@ def build_neural_autoencoder_piggy(mesh, key, params):
     enc_params, dec_params, fd_params = params
 
     # Create MLP encoder
-    encoder = build_neural_encoder(mesh, key, enc_params)
+    encoder = build_neural_encoder(mesh, key, enc_params, generator)
 
     # Build FD decoder
     decoder = build_fd_decoder(mesh, fd_params)
@@ -482,8 +658,11 @@ def build_neural_model(name, config, generator, model_key):
 
     # build model
     fd_params = config["fdm"]
-    encoder_params = config["encoder"]
     decoder_params = config["decoder"]
+    encoder_params = config["encoder"]
+    generator_params = config["generator"]
+
+    encoder_params = (encoder_params, generator_params)
 
     # select model
     if name == "formfinder":
@@ -498,4 +677,4 @@ def build_neural_model(name, config, generator, model_key):
     else:
         raise ValueError(f"Model name {name} is unsupported")
 
-    return build_fn(mesh, model_key, params)
+    return build_fn(mesh, model_key, params, generator)

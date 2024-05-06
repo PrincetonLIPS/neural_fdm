@@ -1,0 +1,45 @@
+# randomness
+seed: 91
+# data generator
+generator:
+  name: "tower_circle"  # options: tower_ellipse, tower_circle
+  bounds: "straight"  # options: straight, twisted
+  height: 10.0
+  radius: 2.0
+  num_sides: 16
+  num_levels: 21
+  num_rings: 3  # must be >=3, 2 of them are the top and bottom supports
+# fd simulation
+fdm:
+  load: 0.0  # -0.5, scale of vertical area load
+# encoder
+encoder: 
+  hidden_layer_size: 512
+  hidden_layer_num: 3
+  activation_fn_name: "elu"
+  final_activation_fn_name: "softplus"  # needs softplus to ensure positive output
+# decoder
+decoder:
+  # If true, the decoder maps (z, boundary conditions) -> x. Otherwise, z -> x.
+  include_params_xl: True
+  hidden_layer_size: 512
+  hidden_layer_num: 3
+  activation_fn_name: "elu"
+# loss function
+loss:
+  energy:
+    include: True
+    weight: 1.0  # weight of the smoothness energy term in the loss function
+    scale: 1.0  # 30.0, bbox length (used for normalization)
+  residual:  # PINN and task term
+    include: True
+    weight: 1.0  # weight of the residual error term in the loss function
+    scale: 1.0  # 0.5, fdm load scale (used for normalization)
+# optimizer
+optimizer:
+  name: "adam"
+  learning_rate: 5.0e-5  # 5.0e-5, Be careful with scientific notation in YAML!
+# training
+training:
+  steps: 500  # 10000
+  batch_size: 64

@@ -1,0 +1,90 @@
+# wandb variables
+program: sweep.py
+project: neural_fofin_bezier
+method: random  # grid, random
+metric:
+  goal: minimize
+  name: loss
+# parameters to be sweeped
+parameters:
+  model:
+    value: "autoencoder"
+  # randomness
+  seed:
+    value: 91
+  # data generator
+  generator:
+    # we need to specify "parameters" again in every nested field of hyperparameters
+    parameters:
+    # a wandb sweep would not work otherwise
+      name:
+        value: "bezier_symmetric_double"
+      bounds:
+        value: "saddle"  # options: pillow, dome, saddle
+      num_uv:
+        value: 10
+      size:
+        value: 10.0
+      num_points:
+        value: 4
+  # fd simulation
+  fdm:
+    parameters:
+      load:
+        value: -0.5
+  # encoder
+  encoder:
+    parameters:
+      hidden_layer_size:
+        values: [128, 256, 512, 1024]
+      hidden_layer_num:
+        values: [3, 4, 5]
+      activation_fn_name:
+        values: ["elu", "relu"]
+      final_activation_fn_name:
+        value: "softplus"
+  # decoder
+  decoder:
+    parameters:
+      include_params_xl:
+        value: True
+      hidden_layer_size:
+        values: [128, 256, 512, 1024]
+      hidden_layer_num:
+        values: [3, 4, 5]
+      activation_fn_name:
+        values: ["elu", "relu"]
+  # loss
+  loss:
+    parameters:
+      shape:
+        parameters:
+          include:
+            value: True
+          weight:
+            value: 1.0
+          scale:
+            value: 1.0
+      residual:  # PINN term
+        parameters:
+          include:
+            value: True
+          weight:
+            value: 1.0
+          scale:
+            value: 1.0
+  # optimizer
+  optimizer:
+    parameters:
+      name:
+        value: "adam"
+      learning_rate:
+        # NOTE: Be careful with scientific notation in YAML!
+        values: [1.0e-3, 3.0e-3, 1.0e-4, 3.0e-4, 5.0e-4, 1.0e-5, 3.0e-5, 5.0e-5]
+  # training
+  training:
+    parameters:
+      steps:
+        value: 10000
+      batch_size:
+        value: 64

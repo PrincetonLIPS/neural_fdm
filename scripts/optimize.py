@@ -11,10 +11,7 @@ from time import perf_counter
 from statistics import mean
 from statistics import stdev
 
-import numpy as np
-
 import jax
-from jax import jit
 from jax import vmap
 import jax.numpy as jnp
 
@@ -37,10 +34,9 @@ from neural_fofin.builders import build_mesh_from_generator
 from neural_fofin.builders import build_data_generator
 from neural_fofin.builders import build_connectivity_structure_from_generator
 from neural_fofin.builders import build_fd_decoder_parametrized
+from neural_fofin.builders import build_loss_function
 
-from neural_fofin.losses import compute_loss
-
-from neural_fofin.serialization import load_model
+from neural_fofin.losses import print_loss_summary
 
 
 # ===============================================================================
@@ -48,11 +44,11 @@ from neural_fofin.serialization import load_model
 # ===============================================================================
 
 def match_batch(
-        optimizer_code=0,
+        optimizer,
+        task,
         param_init=None,
-        b_low=-20.0,
-        b_up=-1e-3,
-        config="config",
+        blow=1e-3,
+        bup=20.0,
         seed=None,
         batch_size=None,
         verbose=True,
@@ -68,9 +64,11 @@ def match_batch(
 
     Parameters
     ___________
-    optimizer_code: `int`
-        An integer selecting the gradient-based optimizer used to solve this task.
-        Supported methods are 0: SLSQP and 1: L-BFGS-B.
+    optimizer: `str`
+        The name gradient-based optimizer used to solve this task.
+        Supported methods are "slsqp" and "lbfgsb".
+    task: `str`
+        The filepath (without extension) of the YAML file with the task hyperparameters.
     param_init: `float`
         If specified, it determines the starting value of all the model parameters.
         If not, then it samples parameters between b_low and b_up from a uniform distribution.
@@ -78,8 +76,6 @@ def match_batch(
         The lower bound of the box constraints on the model parameters.
     b_up: `float`
         The lower bound of the box constraints on the model parameters.
-    config: `str`
-        The filepath (without extension) of the YAML config file with the training hyperparameters.
     seed: `int`
         The random seed to generate a batch of target shapes.
         If `None`, it defaults to the input hyperparameters file.
@@ -102,17 +98,21 @@ def match_batch(
     """
     START = slice_start
     STOP = slice_end or -1
-    CONFIG_NAME = config
+    CONFIG_NAME = task
     EDGECOLOR = edgecolor  # force, fd
     SAVE = save
-    QMIN = b_low
-    QMAX = b_up
+    QMIN = blow
+    QMAX = bup
 
     CAMERA_CONFIG = {
         "position": (30.34, 30.28, 42.94),
         "target": (0.956, 0.727, 1.287),
         "distance": 20.0,
     }
+
+    # pick optimizer name
+    optimizer_names = {"lbfgsb": "L-BFGS-B", "slsqp": "SLSQP"}
+    optimizer_name = optimizer_names[optimizer]
 
     # load yaml file with hyperparameters
     with open(f"{CONFIG_NAME}.yml") as file:
@@ -125,7 +125,6 @@ def match_batch(
     if batch_size is None:
         batch_size = training_params["batch_size"]
 
-    loss_params = config["loss"]
     generator_name = config['generator']['name']
     bounds_name = config['generator']['bounds']
     fd_params = config["fdm"]
@@ -136,20 +135,15 @@ def match_batch(
 
     # create data generator
     generator = build_data_generator(config)
+    compute_loss = build_loss_function(config, generator)
     structure = build_connectivity_structure_from_generator(generator)
     mesh = build_mesh_from_generator(generator)
 
     # generate initial model parameters
-    if param_init is not None:
-        q0 = jnp.ones(structure.num_edges) * float(param_init)
-    else:
-        q0 = jrn.uniform(key, shape=(structure.num_edges, ), minval=QMIN, maxval=QMAX)
+    q0 = calculate_params_init(mesh, param_init, key, QMIN, QMAX)
 
     # create model
-    optimizer_names = {1: "L-BFGS-B", 0: "SLSQP"}
-    optimizer_name = optimizer_names[optimizer_code]
-
-    print(f"Directly optimizing with {optimizer_name} for {generator_name} dataset with {bounds_name} bounds")
+    print(f"Directly optimizing with {optimizer_name} for {generator_name} dataset with {bounds_name} bounds on seed {seed}")
     model = build_fd_decoder_parametrized(q0, mesh, fd_params)
 
     # sample data batch
@@ -165,9 +159,9 @@ def match_batch(
         """
         """
         _model = eqx.combine(diff_model, static_model)
-        return compute_loss(_model, structure, xyz_target, loss_params, False)
+        return compute_loss(_model, structure, xyz_target, aux_data=False)
 
-    # warmstart loss function to eliminate jit compilation time from performance measurements
+    # warmstart loss function to eliminate jit compilation time from perf measurements
     _ = compute_loss_diffable(diff_model, xyz_target=xyz_batch[None, 0])
 
     # define optimization function
@@ -176,7 +170,7 @@ def match_batch(
     opt = ScipyBoundedMinimize(
         fun=compute_loss_diffable,
         method=optimizer_name,
-        jit=True,
+        jit=False,
         tol=1e-6,
         maxiter=5000,
         options={"disp": False},
@@ -184,16 +178,20 @@ def match_batch(
     )
 
     # define parameter bounds
-    bound_low = eqx.tree_at(lambda tree: tree.q, diff_model, replace=(jnp.ones_like(q0) * QMIN))
-    bound_up = eqx.tree_at(lambda tree: tree.q, diff_model, replace=(jnp.ones_like(q0) * QMAX))
-    bounds = (bound_low, bound_up)
+    bound_low, bound_up = calculate_params_bounds(mesh, q0, QMIN, QMAX)
+    bound_low_tree = eqx.tree_at(lambda tree: tree.q, diff_model, replace=(bound_low))
+    bound_up_tree = eqx.tree_at(lambda tree: tree.q, diff_model, replace=(bound_up))
+    bounds = (bound_low_tree, bound_up_tree)
 
     # optimize
-    print(f"\nOptimizing shapes in sequence")
+    print("\nOptimizing shapes in sequence")
     opt_times = []
+
     loss_values = []
     shape_errors = []
     residual_errors = []
+    smooth_errors = []
+    loss_lists = [loss_values, shape_errors, residual_errors, smooth_errors]
 
     were_successful = 0
     if STOP == -1:
@@ -206,34 +204,33 @@ def match_batch(
         xyz = xyz[None, :]
 
         # report start losses
-        _, loss_terms = compute_loss(model, structure, xyz, loss_params, True)
-        loss_val, loss_shape, loss_res = loss_terms
+        _, loss_terms = compute_loss(model, structure, xyz, aux_data=True)
         if verbose:
             print(f"Shape {i}")
-            print(f"\tStart\tLoss: {loss_val:.4f}\tShape error: {loss_shape:.4f}\tResidual error: {loss_res:.4f}")
+            print_loss_summary(loss_terms, prefix="\tStart")
 
         # optimize
         start = perf_counter()
         diff_model_opt, opt_res = opt.run(diff_model, bounds, xyz)
         opt_time = perf_counter() - start
-
         # unite optimal and static submodels
         model_opt = eqx.combine(diff_model_opt, static_model)
 
         # evaluate loss function at optimum point
-        _, loss_terms = compute_loss(model_opt, structure, xyz, loss_params, True)
-        loss_val, loss_shape, loss_res = loss_terms
+        _, loss_terms = compute_loss(model_opt, structure, xyz, aux_data=True)
         if verbose:
-            print(f"\tEnd\tLoss: {loss_val:.4f}\tShape error: {loss_shape:.4f}\tResidual error: {loss_res:.4f}")
+            print_loss_summary(loss_terms, prefix="\tEnd")
+            print(f"\tOpt success?: {opt_res.success}")
+            print(f"\tOpt iters: {opt_res.iter_num}")
             print(f"\tOpt time: {opt_time:.4f} sec")
 
         if opt_res.success:
             were_successful += 1
 
         opt_times.append(opt_time)
-        loss_values.append(loss_val.item())
-        shape_errors.append(loss_shape.item())
-        residual_errors.append(loss_res.item())
+
+        for loss_container, loss_term in zip(loss_lists, loss_terms):
+            loss_container.append(loss_term.item())
 
         # assemble datastructure for post-processing
         eqstate_hat, fd_params_hat = model_opt.predict_states(xyz, structure)
@@ -270,12 +267,12 @@ def match_batch(
             viewer.view.camera.distance = CAMERA_CONFIG["distance"]
 
             # approximated mesh
-            viewer.add(
-                mesh_hat,
-                show_points=False,
-                show_edges=False,
-                opacity=0.2
-            )
+            # viewer.add(
+            #     mesh_hat,
+            #     show_points=False,
+            #     show_edges=False,
+            #     opacity=0.2
+            # )
 
             # edge colors
             if EDGECOLOR == "force":
@@ -302,7 +299,8 @@ def match_batch(
                 edgecolor = EDGECOLOR
 
             viewer.add(network_hat,
-                       edgewidth=(0.01, 0.3),
+                       # edgewidth=(0.01, 0.2),
+                       edgewith=0.01,
                        edgecolor=edgecolor,
                        show_edges=True,
                        edges=[edge for edge in mesh.edges() if not mesh.is_edge_on_boundary(*edge)],
@@ -310,16 +308,16 @@ def match_batch(
                        show_loads=False,
                        loadscale=1.0,
                        show_reactions=True,
-                       reactionscale=1.0,
+                       reactionscale=5.0,
                        reactioncolor=Color.from_rgb255(0, 150, 10),
                        )
 
-            viewer.add(FDNetwork.from_mesh(mesh_target),
-                       as_wireframe=True,
-                       show_points=False,
-                       linewidth=4.0,
-                       color=Color.black().lightened()
-                       )
+            # viewer.add(FDNetwork.from_mesh(mesh_target),
+            #            as_wireframe=True,
+            #            show_points=False,
+            #            linewidth=4.0,
+            #            color=Color.black().lightened()
+            #            )
 
             # show le crème
             viewer.show()
@@ -330,6 +328,60 @@ def match_batch(
     print(f"Loss value over {num_opts} optimizations: {mean(loss_values):.4f} (+-{stdev(loss_values):.4f})")
     print(f"Shape error over {num_opts} optimizations: {mean(shape_errors):.4f} (+-{stdev(shape_errors):.4f})")
     print(f"Residual error over {num_opts} optimizations: {mean(residual_errors):.4f} (+-{stdev(residual_errors):.4f})")
+    if len(smooth_errors) > 0:
+        print(f"Smoothness error over {num_opts} optimizations: {mean(smooth_errors):.4f} (+-{stdev(smooth_errors):.4f})")
+
+
+# ===============================================================================
+# Helper functions
+# ===============================================================================
+
+
+def calculate_params_init(mesh, param_init, key, minval, maxval):
+    """
+    """
+    num_edges = mesh.number_of_edges()
+
+    signs = []
+    for edge in mesh.edges():
+        sign = -1.0  # compression by default
+        # for tower task
+        if mesh.edge_attribute(edge, "tag") == "cable":
+            sign = 1.0
+        signs.append(sign)
+
+    signs = jnp.array(signs)
+
+    if param_init is not None:
+        q0 = jnp.ones(num_edges) * param_init
+    else:
+        q0 = jrn.uniform(key, shape=(num_edges, ), minval=minval, maxval=maxval)
+
+    return q0 * signs
+
+
+def calculate_params_bounds(mesh, q0, minval, maxval):
+    """
+    """
+    bound_low = []
+    bound_up = []
+    for edge in mesh.edges():
+        # compression by default
+        b_low = maxval * -1.0
+        b_up = minval * -1.0
+        # for tower task
+        if mesh.edge_attribute(edge, "tag") == "cable":
+            b_low = minval
+            b_up = maxval
+
+        bound_low.append(b_low)
+        bound_up.append(b_up)
+
+    bound_low = jnp.array(bound_low)
+    bound_up = jnp.array(bound_up)
+
+    return bound_low, bound_up
+
 
 # ===============================================================================
 # Main

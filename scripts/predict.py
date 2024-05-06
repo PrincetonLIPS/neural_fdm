@@ -25,12 +25,13 @@ from jax_fdm.visualization import Viewer
 
 from neural_fofin import DATA
 
+from neural_fofin.builders import build_loss_function
 from neural_fofin.builders import build_mesh_from_generator
 from neural_fofin.builders import build_data_generator
 from neural_fofin.builders import build_connectivity_structure_from_generator
 from neural_fofin.builders import build_neural_model
 
-from neural_fofin.losses import compute_loss
+from neural_fofin.losses import print_loss_summary
 
 from neural_fofin.serialization import load_model
 
@@ -41,7 +42,7 @@ from neural_fofin.serialization import load_model
 
 def predict_batch(
         model,
-        config="config",
+        task,
         seed=None,
         batch_size=None,
         time_inference=True,
@@ -58,8 +59,8 @@ def predict_batch(
         The model name.
         Supported models are formfinder, autoencoder, and piggy.
         Append the suffix `_pinn` to load model versions that were trained with a PINN loss.
-    config: `str`
-        The filepath (without extension) of the YAML config file with the training hyperparameters.
+    task: `str`
+        The name of the YAML config file with the task hyperparameters.
     seed: `int`
         The random seed to generate a batch of target shapes.
         If `None`, it defaults to the input hyperparameters file.
@@ -80,7 +81,7 @@ def predict_batch(
     """
     NAME = model
     START, STOP = slice
-    CONFIG_NAME = config
+    CONFIG_NAME = task
     EDGECOLOR = edgecolor  # force, fd
     SAVE = save
 
@@ -101,7 +102,6 @@ def predict_batch(
     if batch_size is None:
         batch_size = training_params["batch_size"]
 
-    loss_params = config["loss"]
     generator_name = config['generator']['name']
     bounds_name = config['generator']['bounds']
 
@@ -113,10 +113,14 @@ def predict_batch(
     generator = build_data_generator(config)
     structure = build_connectivity_structure_from_generator(generator)
     mesh = build_mesh_from_generator(generator)
+    compute_loss = build_loss_function(config, generator)
+
+    # print info
+    print(f"Making predictions with {NAME} on {generator_name} dataset with {bounds_name} bounds\n")
+    print(f"Structure size: {structure.num_vertices} vertices, {structure.num_edges} edges")
 
     # load model
-    print(f"Making predictions with {NAME} on {generator_name} dataset with {bounds_name} bounds\n")
-    filepath = os.path.join(DATA, f"{NAME}.eqx")
+    filepath = os.path.join(DATA, f"{NAME}_{CONFIG_NAME}.eqx")
     _model_name = NAME.split("_")[0]
     model_skeleton = build_neural_model(_model_name, config, generator, model_key)
     model = load_model(filepath, model_skeleton)
@@ -128,23 +132,22 @@ def predict_batch(
     if time_inference:
         encoding_fn = jit(vmap(model.encode))
         # warmstart
-        q = encoding_fn(xyz_batch)
+        encoding_fn(xyz_batch)
         # time
         times = []
         for i in range(10):
             start = perf_counter()
-            q = encoding_fn(xyz_batch)
+            encoding_fn(xyz_batch)
             duration = perf_counter() - start
             times.append(duration)
         print(f"Inference time on batch size {batch_size}: {mean(times):.4f} (+-{stdev(times):.4f}) s")
 
     # report batch losses
-    _, loss_terms = compute_loss(model, structure, xyz_batch, loss_params, True)
-    loss_val, loss_shape, loss_res = loss_terms
-    print(f"Batch\tLoss: {loss_val:.4f}\tShape error: {loss_shape:.4f}\tResidual error: {loss_res:.4f}")
+    _, loss_terms = compute_loss(model, structure, xyz_batch, aux_data=True)
+    print_loss_summary(loss_terms, prefix="Batch\t")
 
     # make individual predictions
-    print(f"\nPredicing shapes in sequence")
+    print("\nPredicting shapes in sequence")
     for i in range(START, STOP):
         xyz = xyz_batch[i]
 
@@ -154,19 +157,19 @@ def predict_batch(
             model,
             structure,
             xyz[None, :],
-            loss_params,
-            True
+            aux_data=True
         )
 
-        train_loss, shape_error, residual_error = loss_terms
-        print(f"Shape {i}\tLoss: {train_loss:.4f}\tShape error: {shape_error:.4f}\tResidual error: {residual_error:.4f}")
+        print_loss_summary(loss_terms, prefix=f"Shape {i}\t")
 
         mesh_hat = datastructure_updated(mesh, eqstate_hat, fd_params_hat)
         network_hat = FDNetwork.from_mesh(mesh_hat)
+        network_hat.print_stats()
+        print()
 
         # export prediction
         if SAVE:
-            filename = f"mesh_{i}"
+            filename = f"mesh_{CONFIG_NAME}_{i}"
             filepath = os.path.join(DATA, f"{filename}.json")
             mesh_hat.to_json(filepath)
             print(f"Saved prediction to {filepath}")
@@ -192,12 +195,12 @@ def predict_batch(
             viewer.view.camera.distance = CAMERA_CONFIG["distance"]
 
             # approximated mesh
-            viewer.add(
-                mesh_hat,
-                show_points=False,
-                show_edges=False,
-                opacity=0.2
-            )
+            # viewer.add(
+            #     mesh_hat,
+            #     show_points=False,
+            #     show_edges=False,
+            #     opacity=0.2
+            # )
 
             # edge colors
             if EDGECOLOR == "force":
@@ -224,7 +227,8 @@ def predict_batch(
                 edgecolor = EDGECOLOR
 
             viewer.add(network_hat,
-                       edgewidth=(0.01, 0.3),
+                       # edgewidth=(0.01, 0.3),
+                       edgewith=0.01,
                        edgecolor=edgecolor,
                        show_edges=True,
                        edges=[edge for edge in mesh.edges() if not mesh.is_edge_on_boundary(*edge)],
@@ -232,16 +236,16 @@ def predict_batch(
                        show_loads=False,
                        loadscale=1.0,
                        show_reactions=True,
-                       reactionscale=1.0,
+                       reactionscale=5.0,
                        reactioncolor=Color.from_rgb255(0, 150, 10),
                        )
 
-            viewer.add(FDNetwork.from_mesh(mesh_target),
-                       as_wireframe=True,
-                       show_points=False,
-                       linewidth=4.0,
-                       color=Color.black().lightened()
-                       )
+            # viewer.add(FDNetwork.from_mesh(mesh_target),
+            #            as_wireframe=True,
+            #            show_points=False,
+            #            linewidth=4.0,
+            #            color=Color.black().lightened()
+            #            )
 
             # show le crème
             viewer.show()

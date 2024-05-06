@@ -4,7 +4,7 @@ import equinox as eqx
 
 from jax.lax import stop_gradient
 
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Bool
 
 from jax_fdm.equilibrium import EquilibriumModel
 
@@ -110,10 +110,37 @@ class Encoder(eqx.Module):
     """
     An encoder.
     """
-    pass
+    edges_signs: Array
+    # If we want to learn a mapping w.r.t. a slice of the points output by the generator
+    slice_out: Bool
+    slice_indices: Array
+
+    def __init__(
+            self,
+            edges_signs,
+            slice_out=False,
+            slice_indices=None,
+            *args,
+            **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.edges_signs = edges_signs
+        self.slice_out = slice_out
+        self.slice_indices = slice_indices
+
+    def __call__(self, x):
+        """
+        Map x to q.
+        """
+        if self.slice_out:
+            x = jnp.reshape(x, (-1, 3))
+            x = x[self.slice_indices, :]
+            x = jnp.ravel(x)
+
+        return super().__call__(x)
 
 
-class MLPEncoder(eqx.nn.MLP, Encoder):
+class MLPEncoder(Encoder, eqx.nn.MLP):
     """
     A MLP encoder.
     """
@@ -128,7 +155,7 @@ class MLPEncoder(eqx.nn.MLP, Encoder):
         q_hat = super().__call__(x)
 
         # NOTE: negative q denotes compression, positive tension.
-        return q_hat * -1.0
+        return q_hat * self.edges_signs
 
 
 # ===============================================================================
@@ -141,14 +168,12 @@ class Decoder(eqx.Module):
     """
     load: Float
     mask_edges: Array
-    qmin: Float
 
-    def __init__(self, load, mask_edges, qmin=-1e-3, *args, **kwargs):
+    def __init__(self, load, mask_edges, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.load = load
         self.mask_edges = mask_edges
-        self.qmin = qmin
 
     def __call__(self, q, x, structure, aux_data=False):
         """
@@ -171,7 +196,7 @@ class Decoder(eqx.Module):
         """
         TODO: A better model should not be first predicting and then masking edges.
         """
-        return q_hat * self.mask_edges + self.qmin
+        return q_hat * self.mask_edges
 
     def get_xyz_fixed(self, x, structure):
         """
@@ -185,7 +210,10 @@ class Decoder(eqx.Module):
         """
         Calculate applied vertex loads.
         """
-        return calculate_area_loads(x, structure, self.load)
+        if self.load:
+            return calculate_area_loads(x, structure, self.load)
+
+        return jnp.zeros((structure.num_vertices, 3))
 
     def get_xyz(self, params, structure):
         """

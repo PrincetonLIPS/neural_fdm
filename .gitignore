@@ -10,6 +10,8 @@ htmlcov
 
 src/neural_fofin.egg-info/
 
+temp/
+
 data/
 data/backup/
 data/cad/
@@ -22,6 +24,7 @@ scripts/*.png
 scripts/*.ai
 scripts/*.svg
 scripts/*.indd
+scripts/*.eqx
 
 **/wandb/
 

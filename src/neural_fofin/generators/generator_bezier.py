@@ -1,9 +1,9 @@
 import jax.random as jrn
 import jax.numpy as jnp
 
-from neural_fofin.bezier import BezierSurfaceAsymmetric
-from neural_fofin.bezier import BezierSurfaceSymmetric
-from neural_fofin.bezier import BezierSurfaceSymmetricDouble
+from neural_fofin.generators.bezier import BezierSurfaceAsymmetric
+from neural_fofin.generators.bezier import BezierSurfaceSymmetric
+from neural_fofin.generators.bezier import BezierSurfaceSymmetricDouble
 
 
 # ===============================================================================
