@@ -1,20 +1,12 @@
+import jax.numpy as jnp
 from jax import vmap
 
-import jax.numpy as jnp
-
-from neural_fofin.models import AutoEncoderPiggy
-
 from neural_fofin.helpers import vertices_residuals_from_xyz
+from neural_fofin.models import AutoEncoderPiggy
 
 
 def compute_loss(
-        model,
-        structure,
-        x,
-        loss_fn,
-        loss_params,
-        aux_data=False,
-        piggy_mode=False
+    model, structure, x, loss_fn, loss_params, aux_data=False, piggy_mode=False
 ):
     """
     Compute the model loss according to the model type.
@@ -27,41 +19,29 @@ def compute_loss(
     if isinstance(model, AutoEncoderPiggy):
         _loss_fn = _compute_loss_piggy
 
-    return _loss_fn(loss_fn, loss_params, x, x_hat, data_hat, structure, aux_data, piggy_mode)
+    return _loss_fn(
+        loss_fn, loss_params, x, x_hat, data_hat, structure, aux_data, piggy_mode
+    )
 
 
 def _compute_loss(
-        loss_fn,
-        loss_params,
-        x,
-        x_hat,
-        params_hat,
-        structure,
-        aux_data,
-        piggy_mode=False
+    loss_fn, loss_params, x, x_hat, params_hat, structure, aux_data, piggy_mode=False
 ):
     """
     Compute the model loss of an autoencoder.
     """
-    return loss_fn(
-        x,
-        x_hat,
-        params_hat,
-        structure,
-        loss_params,
-        aux_data
-    )
+    return loss_fn(x, x_hat, params_hat, structure, loss_params, aux_data)
 
 
 def _compute_loss_piggy(
-        loss_fn,
-        loss_params,
-        x,
-        x_data_hat,
-        y_data_hat,
-        structure,
-        aux_data,
-        piggy_mode=True
+    loss_fn,
+    loss_params,
+    x,
+    x_data_hat,
+    y_data_hat,
+    structure,
+    aux_data,
+    piggy_mode=True,
 ):
     """
     Compute the model loss of a piggy autoencoder.
@@ -69,38 +49,20 @@ def _compute_loss_piggy(
     x_hat, x_params_hat = x_data_hat
 
     if not piggy_mode:
-        loss_data = loss_fn(
-            x,
-            x_hat,
-            x_params_hat,
-            structure,
-            loss_params,
-            aux_data
-        )
+        loss_data = loss_fn(x, x_hat, x_params_hat, structure, loss_params, aux_data)
     else:
         y_hat, y_params_hat = y_data_hat
         q, xyz_fixed, loads = y_params_hat
 
         loss_data = loss_fn(
-            x_hat,
-            y_hat,
-            y_params_hat,
-            structure,
-            loss_params,
-            aux_data
-            )
+            x_hat, y_hat, y_params_hat, structure, loss_params, aux_data
+        )
 
     return loss_data
 
 
 def compute_loss_residual_smoothness(
-        x,
-        x_hat,
-        params_hat,
-        structure,
-        loss_params,
-        aux_data,
-        *args
+    x, x_hat, params_hat, structure, loss_params, aux_data, *args
 ):
     """
     Compute the model loss.
@@ -136,12 +98,7 @@ def compute_loss_residual_smoothness(
     if smooth_params["include"]:
         loss = loss + loss_smooth
 
-    loss_terms = (
-        loss,
-        loss_shape,
-        loss_residual,
-        loss_smooth
-    )
+    loss_terms = (loss, loss_shape, loss_residual, loss_smooth)
 
     if aux_data:
         return loss, loss_terms
@@ -150,13 +107,7 @@ def compute_loss_residual_smoothness(
 
 
 def compute_loss_shape_residual_smoothness(
-        x,
-        x_hat,
-        params_hat,
-        structure,
-        loss_params,
-        aux_data,
-        *args
+    x, x_hat, params_hat, structure, loss_params, aux_data, *args
 ):
     """
     Compute the model loss.
@@ -207,12 +158,7 @@ def compute_loss_shape_residual_smoothness(
     if smooth_params["include"]:
         loss = loss + loss_smooth
 
-    loss_terms = (
-        loss,
-        loss_shape,
-        loss_residual,
-        loss_smooth
-    )
+    loss_terms = (loss, loss_shape, loss_residual, loss_smooth)
 
     if aux_data:
         return loss, loss_terms
@@ -221,13 +167,7 @@ def compute_loss_shape_residual_smoothness(
 
 
 def compute_loss_shape_residual(
-        x,
-        x_hat,
-        params_hat,
-        structure,
-        loss_params,
-        aux_data,
-        *args
+    x, x_hat, params_hat, structure, loss_params, aux_data, *args
 ):
     """
     Compute the model loss.
@@ -258,11 +198,7 @@ def compute_loss_shape_residual(
     if residual_params["include"]:
         loss = loss + loss_residual
 
-    loss_terms = (
-        loss,
-        loss_shape,
-        loss_residual
-    )
+    loss_terms = (loss, loss_shape, loss_residual)
 
     if aux_data:
         return loss, loss_terms
@@ -294,6 +230,7 @@ def compute_error_residual(x_hat, params_hat, structure, indices):
     """
     Calculate the residual error.
     """
+
     def calculate_residuals(_x_hat, _params_hat):
         """
         _x_hat: the shape predicted by the model
@@ -302,12 +239,7 @@ def compute_error_residual(x_hat, params_hat, structure, indices):
         NOTE: Not using jnp.linalg.norm because we hitted NaNs.
         """
         q_hat, xyz_fixed, loads = _params_hat
-        residual_vectors = vertices_residuals_from_xyz(
-            q_hat,
-            loads,
-            _x_hat,
-            structure
-        )
+        residual_vectors = vertices_residuals_from_xyz(q_hat, loads, _x_hat, structure)
         residual_vectors_free = jnp.ravel(residual_vectors[indices, :])
 
         # return jnp.linalg.norm(residual_vectors_free, axis=-1)
@@ -331,6 +263,17 @@ def compute_error_smoothness(x_hat, params_hat, structure):
     # batch_error = jnp.sum(error, axis=-1)
 
     return jnp.mean(batch_error, axis=-1)
+
+
+def compute_qhat_regularization(q_hat):
+    """
+    Calculate the q_hat low variance
+    """
+    sign_q = jnp.sign(q_hat)
+    var_q_pos = jnp.var(q_hat, where=sign_q > 0)
+    var_q_neg = jnp.var(q_hat, where=sign_q < 0)
+
+    return jnp.mean(var_q_pos) + jnp.mean(var_q_neg)
 
 
 def vertices_smoothness(xyz, structure):
@@ -360,8 +303,7 @@ def vertices_smoothness(xyz, structure):
 
 
 def print_loss_summary(loss_terms, labels=None, prefix=None):
-    """
-    """
+    """ """
     if not labels:
         labels = ["Loss", "Shape error", "Residual error", "Smooth error"]
 
